@@ -1,0 +1,469 @@
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+import os
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.worksheet.page import PageMargins
+import math
+import collections
+
+import win32com.client
+
+
+
+# Shopify API Credentials
+ACCESS_TOKEN = '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'
+STORE_NAME = 'b43a83-2'
+
+
+#PRINTING FUNCTION HERE
+def batch_print_excel_files(directory, customer_name):
+    """
+    Batch prints all Excel files for a specific customer in the given directory.
+    """
+    try:
+        # Create Excel application object
+        excel = win32com.client.Dispatch("Excel.Application")
+        excel.Visible = False  # Don't show Excel
+        excel.DisplayAlerts = False  # Don't show alerts
+
+        # Get all Excel files for this customer
+        safe_customer_name = "".join(x for x in customer_name if x.isalnum() or x in [' ', '_']).rstrip()
+        files = [f for f in os.listdir(directory) if f.startswith(safe_customer_name) and f.endswith('.xlsx')]
+        
+        print(f"\nStarting batch print of {len(files)} worksheets...")
+        
+        for file in files:
+            full_path = os.path.join(directory, file)
+            try:
+                # Open workbook
+                wb = excel.Workbooks.Open(full_path)
+                # Print
+                wb.PrintOut()
+                # Close workbook
+                wb.Close()
+                print(f"Printed: {file}")
+            except Exception as e:
+                print(f"Error printing {file}: {str(e)}")
+
+        print("Batch printing completed!")
+
+    except Exception as e:
+        print(f"Error in batch printing: {str(e)}")
+    finally:
+        # Clean up
+        try:
+            excel.Quit()
+        except:
+            pass
+
+def calculate_due_date(delivery_option):
+    today = datetime.today()
+    if "express delivery 7 - 10 working days" in delivery_option.lower():
+        working_days_needed = 7
+        due_date = today
+        while working_days_needed > 0:
+            due_date += timedelta(days=1)
+            if due_date.weekday() < 5:  # Monday=0, Sunday=6
+                working_days_needed -= 1
+    else:
+        due_date = today + timedelta(weeks=3)
+    
+    return due_date.strftime("%d/%m/%Y")
+
+def calculate_custom_handle_position(handle_position):
+    try:
+        if handle_position.lower() in ['centre', 'center', 'middle']:
+            return 'centre'
+        numeric_value = int(''.join(filter(str.isdigit, handle_position)))
+        return str(numeric_value + 23)
+    except:
+        return handle_position
+    
+def calculate_shutter_components(properties, width, drop, title, item_number):
+    # Get bracket/bead depth
+    bracket_size = properties.get('Bracket Size', '20mm')  # Get Bracket Size
+    
+    # Handle location logic
+    handle_location = properties.get("Handle Location", "None")  # Define this once at the top
+    handle_location_extended = properties.get("Handle Location Extended", "")
+    handle_position = properties.get("Handle Position (mm)", "")
+    
+    # Determine custom handle position
+    if handle_location_extended.lower() == "centre":
+        custom_handle_position = "centre"
+    elif handle_position:
+        try:
+            position_value = int(''.join(filter(str.isdigit, handle_position)))
+            custom_handle_position = str(position_value + 23)
+        except:
+            custom_handle_position = handle_position
+    else:
+        custom_handle_position = "N/A"
+
+    num_panels = int(properties.get("Number Of Panels (min width for more than 1 panel is 500mm)", "1"))
+    fixed_gap = 83
+
+    # Calculate panel configurations
+    if num_panels == 2:
+        top_bottom_rail_width = (width - 150) / 2
+        louver_width = top_bottom_rail_width - 3
+        louver_info = [
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)},
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)},
+        ]
+    elif num_panels == 3:
+        top_bottom_rail_width = (width / 3) - fixed_gap
+        louver_width = top_bottom_rail_width - 3
+        louver_info = [
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)}
+            for _ in range(3)
+        ]
+    else:
+        louver_width = width - 54
+        top_bottom_rail_width = width - 51
+        louver_info = [
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)},
+        ]
+
+    # Calculate other components
+    astragal_height_top = drop + 46
+    tilt_bar_size = astragal_height_top - 138
+    louver_height = 63
+    num_louvers = math.ceil(drop / louver_height)
+
+    # Handle mid rail
+    has_midrail = properties.get("Center mid rail required for drops greater than 1500mm", "").lower() == "yes"
+    mid_rail_position = drop // 2 if has_midrail else 0
+
+    # Handle location
+    handle_location_extended = properties.get("Handle Location Extended", "")
+    window_handle_centered = "Yes" if handle_location_extended.lower() == "centre" else "No"
+
+    return {
+        "Panel Configuration": properties.get("Tilt Control Side", "L")[0].upper(),
+        "Rail Size": "50mm",
+        "Colour": title.upper(),
+        "Frame Style": "",
+        "Length": drop,
+        "Window Handle Position": handle_location,
+        "Window Depth": bracket_size,
+        "Louver Info": louver_info,
+        "Stiles Height Top": astragal_height_top,
+        "Astragal Size Top": astragal_height_top,
+        "Tilt Bars": 1.00,
+        "Account Number": "C001268",
+        "Shutter Style": "DIVIDER RAIL" if has_midrail else "FULL HEIGHT",
+        "Shutter System": "Urban Shutter Lite - Stiles Only",
+        "Panels Across": str(num_panels),
+        "LouverSize": "63mm",
+        "Width": width,
+        "Window Handle Centered": window_handle_centered,
+        "Astragal": "RHOverLH",
+        "Number of Louvers": num_louvers,
+        "Number of Rails": 3 if has_midrail else 2,
+        "Stiles Bars Top": 2.00,
+        "Tilt Bar Size Top": tilt_bar_size,
+        "Has Midrail": has_midrail,
+        "Mid Rail Position": mid_rail_position,
+        "Mid Rail Size": louver_info[0]["Top Bottom Rail Width"] if louver_info else 0,
+        "custom_handle_position": custom_handle_position,
+        "Number of Louvers Required": num_louvers,
+        "Top Bottom Rail Width": round(top_bottom_rail_width, 1)
+    }
+
+def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_first_sheet=False, item_number=1):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Shutter Specification"
+    
+    # Set page margins and column widths
+    ws.page_margins = PageMargins(left=0.15, right=0.15, top=0.15, bottom=0.15)
+    ws.column_dimensions['A'].width = 30
+    ws.column_dimensions['B'].width = 40
+    ws.column_dimensions['C'].width = 23
+    ws.column_dimensions['D'].width = 23
+
+    # Define styles
+    header_font = Font(bold=True, size=16)
+    subheader_font = Font(bold=True, size=12)
+    standard_font = Font(size=12)
+    left_alignment = Alignment(horizontal="left", vertical="center")
+    pink_fill = PatternFill(start_color="FFC0CB", end_color="FFC0CB", fill_type="solid")
+
+    # Title section
+    ws.merge_cells('A1:D1')
+    title_cell = ws['A1']
+    title_cell.value = "Perfect-Fit-Shutters"
+    title_cell.font = header_font
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Due date section
+    ws.merge_cells('A2:D2')
+    due_date_cell = ws['A2']
+    due_date_cell.value = f"Due Date: {calculate_due_date(delivery_option)} - Shipping Type: {delivery_option}"
+    due_date_cell.font = subheader_font
+    due_date_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    if "express delivery" in delivery_option.lower():
+        due_date_cell.fill = pink_fill
+
+    # Calculate multi-panel configuration
+    num_panels = len(shutter_data['Louver Info'])
+    panel_config = shutter_data['Panel Configuration'] * num_panels  # This will make "R" into "RR" for 2 panels
+
+    # Main data section - Left side and right side data
+    left_headers = [
+        ("System", "Urban Shutters Perfect Fit Lite", "Account Number", shutter_data['Account Number']),
+        ("Shutter Number", "", "Order Number", shutter_data.get('Order Number', '')),
+        ("Name", shutter_data.get('Customer Name', ''), "Shutter Style", shutter_data['Shutter Style']),
+        ("Location", str(item_number), "Shutter System", shutter_data['Shutter System']),
+        ("Panel Configuration", panel_config, "Panels Across", shutter_data['Panels Across']),
+        ("Rail Size", shutter_data['Rail Size'], "LouverSize", shutter_data['LouverSize']),
+        ("Colour", shutter_data['Colour'], "Width", shutter_data['Width']),
+        ("Frame Style", shutter_data['Frame Style'], "Window Handle Centered", shutter_data['Window Handle Centered']),
+        ("Length", shutter_data['Length'], "Astragal", shutter_data['Astragal']),
+        ("Window Depth", shutter_data['Window Depth'], "Number of Rails", shutter_data['Number of Rails']),
+        ("Handle Rebate Position", shutter_data['Window Handle Position'], "Stiles Bars Top", shutter_data['Stiles Bars Top']),
+        ("Handle Location", shutter_data['custom_handle_position'], "Tilt Bar Size Top", shutter_data['Tilt Bar Size Top']),
+        ("Mid Rail", "Yes" if shutter_data['Has Midrail'] else "No", "", ""),
+        ("Mid Rail Size", shutter_data['Mid Rail Size'] if shutter_data['Has Midrail'] else "N/A", "", ""),
+        ("Stiles/Tilt", "", "", ""),
+        ("Stiles Height Top", shutter_data['Stiles Height Top'], "", "")
+    ]
+    
+    # Add headers and values in 4 columns
+    current_row = 4
+    for left_header, left_value, right_header, right_value in left_headers:
+        # Left side
+        cell1 = ws.cell(row=current_row, column=1, value=left_header)
+        cell2 = ws.cell(row=current_row, column=2, value=left_value)
+        cell1.font = subheader_font
+        cell2.font = standard_font
+        cell1.alignment = left_alignment
+        cell2.alignment = left_alignment
+        
+        # Add pink fill for handle cells
+        if left_header in ["Handle Rebate Position", "Handle Location"]:
+            cell1.fill = pink_fill
+            cell2.fill = pink_fill
+        
+        # Right side
+        if right_header:
+            cell3 = ws.cell(row=current_row, column=3, value=right_header)
+            cell4 = ws.cell(row=current_row, column=4, value=right_value)
+            cell3.font = subheader_font
+            cell4.font = standard_font
+            cell3.alignment = left_alignment
+            cell4.alignment = left_alignment
+        
+        current_row += 1
+
+    # Add Louvers section
+    current_row += 1
+    ws.cell(row=current_row, column=1, value="LOUVERS").font = subheader_font
+    current_row += 1
+
+    # Individual panel louver widths, number of louvers, and rail widths
+    for index in range(1, num_panels + 1):
+        ws.cell(row=current_row, column=1, value=f"NUMBER OF LOUVERS {index}:").font = subheader_font
+        ws.cell(row=current_row, column=2, value=shutter_data['Number of Louvers']).font = standard_font
+        current_row += 1
+
+        ws.cell(row=current_row, column=1, value=f"LOUVER WIDTH {index}:").font = subheader_font
+        ws.cell(row=current_row, column=2, value=shutter_data['Louver Info'][index-1]["Louver Width"]).font = standard_font
+        current_row += 1
+        
+        ws.cell(row=current_row, column=1, value=f"TOP AND BOTTOM RAIL {index}:").font = subheader_font
+        ws.cell(row=current_row, column=2, value=shutter_data['Louver Info'][index-1]["Top Bottom Rail Width"]).font = standard_font
+        current_row += 1
+
+    # Add checklist section
+    current_row += 2
+    ws.cell(row=current_row, column=1, value="CHECK LIST").font = header_font
+    current_row += 1
+
+    checklist_items = [
+        ("Made By:", "________________________"),
+        ("Handles By:", "________________________"),
+        ("Brackets Size:", "________________________"),
+        ("Bracket Quantity:", "________________________"),
+        ("Quantity Of Caps Packed:", "________________________"),
+        ("", ""),
+        ("Quality Control:", ""),
+        ("□ Shutter Checked:", "________________________"),
+        ("□ All Caps Fitted:", "________________________"),
+        ("□ Top/Bottom Holes Punched:", "________________________"),
+    ]
+
+    if is_first_sheet:
+        checklist_items.append(("", ""))
+        checklist_items.append(("Fitting Instructions Required", "________________________"))
+
+    for header, value in checklist_items:
+        ws.cell(row=current_row, column=1, value=header).font = subheader_font
+        ws.cell(row=current_row, column=2, value=value).font = standard_font
+        ws.cell(row=current_row, column=1).alignment = Alignment(horizontal="right", vertical="center")
+        ws.cell(row=current_row, column=2).alignment = Alignment(horizontal="left", vertical="center")
+        current_row += 1
+
+    wb.save(output_path)
+
+def fetch_order_json(order_id):
+    base_url = f'https://{STORE_NAME}.myshopify.com/admin/api/2023-10'
+    endpoint = f'/orders.json?status=any'
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': ACCESS_TOKEN,
+    }
+
+    response = requests.get(base_url + endpoint, headers=headers)
+    if response.status_code == 200:
+        orders = response.json().get('orders', [])
+        order = next((order for order in orders if order['order_number'] == order_id), None)
+        if not order:
+            print(f"No order found with order ID: {order_id}")
+            return None
+        return order
+    else:
+        print(f"Error fetching orders: {response.status_code}")
+        return None
+
+def process_order(order_json):
+    if not order_json:
+        return None
+
+    # Extract customer details
+    customer_name = f"{order_json['billing_address']['first_name']} {order_json['billing_address']['last_name']}"
+    
+    # Create output directory
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Create XML root
+    root = ET.Element("Order", {
+        "AccountName": customer_name,
+        "AccountCode": "C001268",
+        "CustOrderRef": f"PF/{customer_name.split()[-1].upper()}",
+        "CustOrderID": str(order_json['id']),
+        "OrderDate": datetime.now().strftime("%d/%m/%Y"),
+        "OS": "Platform: Win32NT         Version: 6.2.9200.0",
+        "DeliveryLocationID": "000007567",
+        "DeliveryLocationName": "McGRATHS CARPETS BLINDS &amp;",
+        "USCCVersion": "1.3.0.0",
+        "UrbanShutterOption": "UrbanShutterLiteStilesOnly",
+    })
+
+    # Keep track of total items for sequential numbering
+    current_item_number = 1
+
+    # Process each line item
+    for line_item in order_json['line_items']:
+        # Extract properties
+        properties = {prop['name'].strip(): prop['value'] for prop in line_item.get('properties', [])}
+        
+        # Get width and drop
+        width = int(properties.get("Width (mm) (Minimum width is 230mm and max is 2400mm)", "0"))
+        drop = int(properties.get("Drop (mm) (Minimum drop is 159mm and max is 2150mm)", "0"))
+        
+        # Get quantity
+        quantity = int(line_item.get('quantity', 1))
+        
+        # Create quantity number of items/sheets
+        for q in range(quantity):
+            # Calculate shutter data first to have access to all values
+            shutter_data = calculate_shutter_components(properties, width, drop, line_item['title'], current_item_number)
+            
+            # Create XML item element
+            panel_qty = int(properties.get("Number Of Panels (min width for more than 1 panel is 500mm)", "1"))
+            tilt_control_side = properties.get("Tilt Control Side", "L")
+            panel_configuration = tilt_control_side[0] * panel_qty
+
+            # Create OrderedDict for attributes to maintain correct order
+            attrs = collections.OrderedDict([
+                ("PanelConfiguration", panel_configuration),
+                ("ItemNumber", str(current_item_number)),
+                ("PanelQty", str(panel_qty)),
+                ("ShutterColour", line_item['title'].upper()),
+                ("LouvreSize", "63mm"),
+                ("Width", str(width)),
+                ("Drop", str(drop)),
+                ("ShutterStyle", "DIVIDER RAIL" if properties.get("Center mid rail required for drops greater than 1500mm", "").lower() == "yes" else "FULL HEIGHT"),
+                ("WindowDepth", properties.get('Bracket Size', '20mm').rstrip('mm')),
+                ("UrbanShutterOption", "Urban Shutter Lite - Stiles Only"),
+                ("WindowHandleCentered", "Yes" if properties.get("Handle Location Extended", "").lower() == "centre" else "No"),
+                ("HandleRebatePosition", properties.get("Handle Location", "None")),
+                ("CustomHandleRebatePosition", str(int(properties.get("Handle Position (mm)", "0")) + 23) if properties.get("Handle Position (mm)") else ""),
+                ("Buildout", "None"),
+                ("TiltBarSplit1", "0"),
+                ("TiltBarSplit2", "0"),
+                ("RailSize", "50mm"),
+                ("ClosingSystem", "SpringCatch"),
+                ("BlindLocation", f"L{current_item_number}")
+            ])
+
+            # Insert DivRailPosFirst after ShutterStyle if has midrail
+            if properties.get("Center mid rail required for drops greater than 1500mm", "").lower() == "yes":
+                # Create new OrderedDict with DivRailPosFirst in correct position
+                new_attrs = collections.OrderedDict()
+                for key, value in attrs.items():
+                    new_attrs[key] = value
+                    if key == "ShutterStyle":
+                        new_attrs["DivRailPosFirst"] = str(drop // 2)
+                attrs = new_attrs
+
+            item_element = ET.SubElement(root, "Item", attrs)
+            
+            shutter_data['Customer Name'] = customer_name
+            shutter_data['Order Number'] = f"PF/{customer_name.split()[-1].upper()}"
+            
+            # Generate Excel worksheet
+            safe_customer_name = "".join(x for x in customer_name if x.isalnum() or x in [' ', '_']).rstrip()
+            excel_file_path = os.path.join(output_dir, f'{safe_customer_name}_shutter_{current_item_number}.xlsx')
+            
+            delivery_option = properties.get("Delivery Option", "Standard Delivery")
+            generate_shutter_worksheet(
+                shutter_data,
+                excel_file_path,
+                delivery_option,
+                is_first_sheet=(current_item_number == 1),
+                item_number=current_item_number
+            )
+            
+            print(f"Generated worksheet: {excel_file_path}")
+            
+            current_item_number += 1
+
+    # Save XML file
+    safe_customer_name = "".join(x for x in customer_name if x.isalnum() or x in [' ', '_']).rstrip()
+    xml_file_path = os.path.join(output_dir, f'{safe_customer_name}_shutters.xml')
+    tree = ET.ElementTree(root)
+    tree.write(xml_file_path, encoding="utf-8", xml_declaration=True)
+    
+    print(f"Generated XML file: {xml_file_path}")
+    
+    return xml_file_path
+
+def main():
+    target_order_id = 1145  #ENTER THE ORDER NUMBER HERE 
+    order_json = fetch_order_json(target_order_id)
+    
+    if order_json:
+        customer_name = f"{order_json['billing_address']['first_name']} {order_json['billing_address']['last_name']}"
+        xml_file_path = process_order(order_json)
+        if xml_file_path:
+            print("\nProcessing complete!")
+            print(f"Files have been generated in the 'output' directory")
+            
+            # Add batch printing
+            output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+            print("\nStarting batch print...")
+            batch_print_excel_files(output_dir, customer_name)
+        else:
+            print("Error processing order")
+    else:
+        print("No order data found")
+
+if __name__ == "__main__":
+    main()p
