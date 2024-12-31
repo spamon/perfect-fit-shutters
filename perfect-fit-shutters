@@ -13,7 +13,7 @@ import win32com.client
 
 
 # Shopify API Credentials
-ACCESS_TOKEN = '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'
+ACCESS_TOKEN = ''
 STORE_NAME = 'b43a83-2'
 
 
