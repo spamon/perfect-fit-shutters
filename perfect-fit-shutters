@@ -14,7 +14,7 @@ import win32com.client
 
 # Shopify API Credentials
 ACCESS_TOKEN = ''
-STORE_NAME = 'b43a83-2'
+STORE_NAME = ''
 
 
 #PRINTING FUNCTION HERE
@@ -58,19 +58,19 @@ def batch_print_excel_files(directory, customer_name):
         except:
             pass
 
-def calculate_due_date(delivery_option):
+def calculate_due_date(shipping_option):
     today = datetime.today()
-    if "express delivery 7 - 10 working days" in delivery_option.lower():
+    if isinstance(shipping_option, str) and "Fast Track - 7-10 Working Days" in shipping_option:
         working_days_needed = 7
         due_date = today
         while working_days_needed > 0:
             due_date += timedelta(days=1)
             if due_date.weekday() < 5:  # Monday=0, Sunday=6
                 working_days_needed -= 1
-    else:
-        due_date = today + timedelta(weeks=3)
+        return due_date.strftime("%d/%m/%Y")
     
-    return due_date.strftime("%d/%m/%Y")
+    # Standard delivery
+    return (today + timedelta(weeks=3)).strftime("%d/%m/%Y")
 
 def calculate_custom_handle_position(handle_position):
     try:
@@ -173,7 +173,7 @@ def calculate_shutter_components(properties, width, drop, title, item_number):
         "Top Bottom Rail Width": round(top_bottom_rail_width, 1)
     }
 
-def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_first_sheet=False, item_number=1):
+def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_first_sheet=False, item_number=1, total_items=None):
     wb = Workbook()
     ws = wb.active
     ws.title = "Shutter Specification"
@@ -184,6 +184,14 @@ def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_fi
     ws.column_dimensions['B'].width = 40
     ws.column_dimensions['C'].width = 23
     ws.column_dimensions['D'].width = 23
+    
+    # Set page setup before any content
+    ws.page_setup.orientation = 'portrait'
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+    ws.page_setup.scale = False
 
     # Define styles
     header_font = Font(bold=True, size=16)
@@ -211,9 +219,9 @@ def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_fi
 
     # Calculate multi-panel configuration
     num_panels = len(shutter_data['Louver Info'])
-    panel_config = shutter_data['Panel Configuration'] * num_panels  # This will make "R" into "RR" for 2 panels
+    panel_config = shutter_data['Panel Configuration'] * num_panels
 
-    # Main data section - Left side and right side data
+    # Main data section
     left_headers = [
         ("System", "Urban Shutters Perfect Fit Lite", "Account Number", shutter_data['Account Number']),
         ("Shutter Number", "", "Order Number", shutter_data.get('Order Number', '')),
@@ -236,7 +244,6 @@ def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_fi
     # Add headers and values in 4 columns
     current_row = 4
     for left_header, left_value, right_header, right_value in left_headers:
-        # Left side
         cell1 = ws.cell(row=current_row, column=1, value=left_header)
         cell2 = ws.cell(row=current_row, column=2, value=left_value)
         cell1.font = subheader_font
@@ -244,12 +251,10 @@ def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_fi
         cell1.alignment = left_alignment
         cell2.alignment = left_alignment
         
-        # Add pink fill for handle cells
         if left_header in ["Handle Rebate Position", "Handle Location"]:
             cell1.fill = pink_fill
             cell2.fill = pink_fill
         
-        # Right side
         if right_header:
             cell3 = ws.cell(row=current_row, column=3, value=right_header)
             cell4 = ws.cell(row=current_row, column=4, value=right_value)
@@ -265,7 +270,6 @@ def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_fi
     ws.cell(row=current_row, column=1, value="LOUVERS").font = subheader_font
     current_row += 1
 
-    # Individual panel louver widths, number of louvers, and rail widths
     for index in range(1, num_panels + 1):
         ws.cell(row=current_row, column=1, value=f"NUMBER OF LOUVERS {index}:").font = subheader_font
         ws.cell(row=current_row, column=2, value=shutter_data['Number of Louvers']).font = standard_font
@@ -308,6 +312,14 @@ def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_fi
         ws.cell(row=current_row, column=2).alignment = Alignment(horizontal="left", vertical="center")
         current_row += 1
 
+    # Add page numbers at the bottom right
+    if total_items:
+        current_row += 2
+        page_number_cell = ws.cell(row=current_row, column=4)
+        page_number_cell.value = f"Sheet {item_number}/{total_items}"
+        page_number_cell.font = Font(size=12, bold=True)
+        page_number_cell.alignment = Alignment(horizontal="right", vertical="center")
+
     wb.save(output_path)
 
 def fetch_order_json(order_id):
@@ -334,14 +346,11 @@ def process_order(order_json):
     if not order_json:
         return None
 
-    # Extract customer details
     customer_name = f"{order_json['billing_address']['first_name']} {order_json['billing_address']['last_name']}"
     
-    # Create output directory
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Create XML root
     root = ET.Element("Order", {
         "AccountName": customer_name,
         "AccountCode": "C001268",
@@ -355,32 +364,22 @@ def process_order(order_json):
         "UrbanShutterOption": "UrbanShutterLiteStilesOnly",
     })
 
-    # Keep track of total items for sequential numbering
     current_item_number = 1
+    total_items = sum(int(item.get('quantity', 1)) for item in order_json['line_items'])
 
-    # Process each line item
     for line_item in order_json['line_items']:
-        # Extract properties
         properties = {prop['name'].strip(): prop['value'] for prop in line_item.get('properties', [])}
-        
-        # Get width and drop
         width = int(properties.get("Width (mm) (Minimum width is 230mm and max is 2400mm)", "0"))
         drop = int(properties.get("Drop (mm) (Minimum drop is 159mm and max is 2150mm)", "0"))
-        
-        # Get quantity
         quantity = int(line_item.get('quantity', 1))
         
-        # Create quantity number of items/sheets
         for q in range(quantity):
-            # Calculate shutter data first to have access to all values
             shutter_data = calculate_shutter_components(properties, width, drop, line_item['title'], current_item_number)
             
-            # Create XML item element
             panel_qty = int(properties.get("Number Of Panels (min width for more than 1 panel is 500mm)", "1"))
             tilt_control_side = properties.get("Tilt Control Side", "L")
             panel_configuration = tilt_control_side[0] * panel_qty
 
-            # Create OrderedDict for attributes to maintain correct order
             attrs = collections.OrderedDict([
                 ("PanelConfiguration", panel_configuration),
                 ("ItemNumber", str(current_item_number)),
@@ -403,14 +402,12 @@ def process_order(order_json):
                 ("BlindLocation", f"L{current_item_number}")
             ])
 
-            # Insert DivRailPosFirst after ShutterStyle if has midrail
             if properties.get("Center mid rail required for drops greater than 1500mm", "").lower() == "yes":
-                # Create new OrderedDict with DivRailPosFirst in correct position
                 new_attrs = collections.OrderedDict()
                 for key, value in attrs.items():
                     new_attrs[key] = value
                     if key == "ShutterStyle":
-                        new_attrs["DivRailPosFirst"] = str(drop // 2)
+                        new_attrs["DivRailPosFirst"] = str((drop // 2) + 23)
                 attrs = new_attrs
 
             item_element = ET.SubElement(root, "Item", attrs)
@@ -418,24 +415,23 @@ def process_order(order_json):
             shutter_data['Customer Name'] = customer_name
             shutter_data['Order Number'] = f"PF/{customer_name.split()[-1].upper()}"
             
-            # Generate Excel worksheet
             safe_customer_name = "".join(x for x in customer_name if x.isalnum() or x in [' ', '_']).rstrip()
             excel_file_path = os.path.join(output_dir, f'{safe_customer_name}_shutter_{current_item_number}.xlsx')
             
-            delivery_option = properties.get("Delivery Option", "Standard Delivery")
+            delivery_option = properties.get("Shipping Options", "Standard Delivery")
             generate_shutter_worksheet(
                 shutter_data,
                 excel_file_path,
                 delivery_option,
                 is_first_sheet=(current_item_number == 1),
-                item_number=current_item_number
+                item_number=current_item_number,
+                total_items=total_items
             )
             
             print(f"Generated worksheet: {excel_file_path}")
             
             current_item_number += 1
 
-    # Save XML file
     safe_customer_name = "".join(x for x in customer_name if x.isalnum() or x in [' ', '_']).rstrip()
     xml_file_path = os.path.join(output_dir, f'{safe_customer_name}_shutters.xml')
     tree = ET.ElementTree(root)
@@ -446,7 +442,7 @@ def process_order(order_json):
     return xml_file_path
 
 def main():
-    target_order_id = 1145  #ENTER THE ORDER NUMBER HERE 
+    target_order_id = 1223  #ENTER THE ORDER NUMBER HERE 
     order_json = fetch_order_json(target_order_id)
     
     if order_json:
@@ -459,11 +455,11 @@ def main():
             # Add batch printing
             output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
             print("\nStarting batch print...")
-            batch_print_excel_files(output_dir, customer_name)
+            # batch_print_excel_files(output_dir, customer_name)
         else:
             print("Error processing order")
     else:
         print("No order data found")
 
 if __name__ == "__main__":
-    main()p
+    main()
